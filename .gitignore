@@ -1,0 +1,24 @@
+# 大文件不进仓库（镜像放在 Releases）
+*.img
+*.ext4
+*.ext4.gz
+*.zip
+*.apk
+*.7z
+*.tar
+*.tar.gz
+
+# 构建/临时产物
+out/
+build/
+release/
+*.log
+__pycache__/
+*.pyc
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini

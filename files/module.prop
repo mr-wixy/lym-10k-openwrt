@@ -1,0 +1,6 @@
+id=lym10k_boot_linux
+name=LYM-10K Boot Linux
+version=v1.0
+versionCode=1
+author=LYM-10K e5-linux
+description=Magisk 里点本模块的「Action」即可写入 misc 武装 slot b 并重启，进入 e5-linux（OpenWrt，装在 e5root 分区）。回到 Android 请在 Linux 里执行 e5-next-boot android && reboot。
