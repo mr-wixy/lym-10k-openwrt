@@ -101,6 +101,7 @@ powershell -ExecutionPolicy Bypass -File .\flash-openwrt.ps1
 - [双系统切换](docs/04-switch.md) —— 两个方向的切换方法
 - [常见问题](docs/05-troubleshooting.md) —— 出问题先看这里
 - [FAQ](docs/06-faq.md) —— 会不会丢数据、能不能卸载、保修怎么办
+- [内存占用](docs/07-memory.md) —— 1.5 GiB 都花在哪、怎么优化
 
 ---
 
