@@ -35,12 +35,54 @@ Swap:        524284           0      524284
 WebKit 四件套合计约 **340 MB**，是这块 1.5 GiB 内存的主要压力来源；
 其余是若干 Python 看护进程（每个解释器 10–20 MB）。
 
-## 已做的三项优化
+## 已做的四项优化
 
-### 0. 面板内存守护（`/etc/init.d/memguard`）
+### 0. WebKit 内存上限（真正的根治）
+
+面板的 `WPENetworkProcess` 会持续泄漏，实测 **52 MB/h**（21 小时涨到 790 MB）。
+但 **cog 自带 WebKit 原生的内存压力处理**（`cog --help-memory-limits`），
+设了上限之后由 WebKit 自己回收，不会无限增长：
+
+```sh
+/usr/bin/cage -d -- /usr/bin/cog -P wl --bg-color=black \
+	--net-mem-limit=160 --net-check-interval=30 \
+	--net-conservative-threshold=0.5 --net-strict-threshold=0.75 \
+	--web-mem-limit=220 --web-check-interval=30 \
+	--web-conservative-threshold=0.5 --web-strict-threshold=0.75 \
+	--enable-write-console-messages-to-stdout=true \
+	--webprocess-failure=restart \
+	http://127.0.0.1:8088/ &
+```
+
+含义：
+
+| 参数 | 值 | 说明 |
+|---|---|---|
+| `--net-mem-limit` | 160 | 网络进程上限 MiB |
+| `--net-check-interval` | 30 | 每 30 秒检查一次 |
+| `--net-conservative-threshold` | 0.5 | 达到 50% 温和回收 |
+| `--net-strict-threshold` | 0.75 | 达到 75% 强制回收 |
+| `--web-mem-limit` | 220 | 渲染进程上限 MiB |
+
+**效果**：`WPENetworkProcess` 在 74 MB 附近波动而不是单调爬升，
+可用内存稳定在 **933–973 MB**。
+
+> 顺带纠正一个误读：之前看到的 `VmData` 72 GB 是**虚拟地址空间预留**，
+> 不是真实占用。真正要看的是 `VmRSS` 和 `MemAvailable`。
+
+### 0b. glibc 分配器调优
+
+```sh
+export MALLOC_ARENA_MAX=2
+export MALLOC_TRIM_THRESHOLD_=131072
+```
+
+减少内存 arena 数量，并让释放的堆尽快还给系统。
+
+### 0c. 面板内存守护（兜底，`/etc/init.d/memguard`）
 
 WebKit 的 **`WPENetworkProcess` 会缓慢泄漏**：实测开机 21 小时后 RSS 涨到
-**790 MB**（`VmData` 72 GB），把 1.5 GiB 内存吃到 93%，可用只剩 122 MB。
+**790 MB**，把 1.5 GiB 内存吃到 93%，可用只剩 122 MB。
 单纯重启面板就能全部回收：
 
 | | 重启前 | 重启后 |
@@ -49,14 +91,17 @@ WebKit 的 **`WPENetworkProcess` 会缓慢泄漏**：实测开机 21 小时后 R
 | 可用 | 214 MB | 977 MB |
 | NetworkProcess RSS | 790 MB | 60 MB |
 
-所以 `memguard` 会在两种情况下自动重启一次面板 UI：
+有了上面的内存上限后，memguard 只是兜底：
 
 | 配置 | 默认 | 含义 |
 |---|---|---|
 | `e5-memguard.main.enabled` | 1 | 总开关 |
-| `e5-memguard.main.min_avail_mb` | 200 | 可用内存低于此值就重启 |
-| `e5-memguard.main.max_age_min` | 360 | 面板运行超过 6 小时就重启（0 关闭） |
+| `e5-memguard.main.min_avail_mb` | 250 | 可用内存低于此值就重启 |
+| `e5-memguard.main.max_age_min` | 720 | 面板运行超过 12 小时就重启（0 关闭） |
 | `e5-memguard.main.check_sec` | 60 | 检查间隔 |
+
+> 注意：OpenWrt 没有 `getconf`。早期版本的 memguard 用它取时钟频率，
+> 导致进程存活时间恒为 0、时间触发从不生效——已修正。
 
 查看是否生效：
 
