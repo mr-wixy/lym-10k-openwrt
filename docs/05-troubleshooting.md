@@ -255,6 +255,67 @@ curl -s http://127.0.0.1:8088/api/status | head -c 400
 
 ---
 
+### 信息屏设备信息页全是 `—`、"AT 命令均失败"
+
+**现象**：面板「设备信息」页的调制方式、MCS、BLER、QCI、AMBR、IMEI、IMSI、ICCID
+全是 `—`；`/run/t551m-sims.json` 里报 `Invalid or expired AT request`。
+
+**原因**：这块基带**不支持在一行里用 `;` 串联多条 AT 命令**：
+
+```sh
+/opt/e5/t551m-at -t 2 'AT+CGSN'                 # 正常
+/opt/e5/t551m-at -t 2 'AT+SPACTCARD=0;AT+CGSN'  # +CME ERROR: 65536014
+```
+
+旧版脚本把"选卡 + 查询"拼成一条发，于是整轮采集都被拒。
+
+**检查**：
+
+```sh
+/opt/e5/t551m-at -t 2 'AT+SPACTCARD=0'      # 期望 OK
+/opt/e5/t551m-at -t 2 'AT+CGSN'             # 期望 IMEI + OK
+/usr/libexec/t551m-screen-details           # 期望 error:false 且 values 有值
+```
+
+**处理**：用本仓库的官方镜像（v1.1.0 起已修复）。手动确认修复是否在位：
+
+```sh
+grep -n 'SPACTCARD' /usr/libexec/t551m-screen-details /usr/libexec/t551m-sim-status /usr/libexec/unisoc-modem/cell
+```
+
+每个文件里都**不该**再出现 `AT+SPACTCARD=x;...` 这种带分号的写法。
+
+---
+
+### LuCI 首页信号参数空白 / 报 "AT backend did not answer"
+
+**原因**：`mu300dash` 通过 `/usr/libexec/unisoc-modem/at` 分发器取数，
+而它的 custom 后端契约是 `<适配器> <超时> <命令>`，`t551m-at` 却要 `-t <秒> <命令>`，
+参数对不上就会报 `t551m-at: Unexpected argument`。
+
+**检查**：
+
+```sh
+uci get unisoc_modem.main.at_command          # 应该是 .../at-custom
+/usr/libexec/unisoc-modem/at -t 5 'AT+COPS?'  # 期望返回运营商 + OK
+ubus call mu300dash signal '{"slot":"0"}'     # 期望有 reg / sig
+```
+
+**处理**：确认 `at-custom` 转接脚本存在且可执行：
+
+```sh
+cat /usr/libexec/unisoc-modem/at-custom
+# #!/bin/sh
+# exec /opt/e5/t551m-at -t "${1:-5}" "${2:-AT}"
+
+uci set unisoc_modem.main.at_command='/usr/libexec/unisoc-modem/at-custom'
+uci commit unisoc_modem
+```
+
+`signal` 有 30 秒缓存，改完等一轮再看；`cells` 同理。
+
+---
+
 ### 流量页今日/本月是空的
 
 ```sh
