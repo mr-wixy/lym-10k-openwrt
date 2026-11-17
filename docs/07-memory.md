@@ -35,7 +35,41 @@ Swap:        524284           0      524284
 WebKit 四件套合计约 **340 MB**，是这块 1.5 GiB 内存的主要压力来源；
 其余是若干 Python 看护进程（每个解释器 10–20 MB）。
 
-## 已经做的两项优化
+## 已做的三项优化
+
+### 0. 面板内存守护（`/etc/init.d/memguard`）
+
+WebKit 的 **`WPENetworkProcess` 会缓慢泄漏**：实测开机 21 小时后 RSS 涨到
+**790 MB**（`VmData` 72 GB），把 1.5 GiB 内存吃到 93%，可用只剩 122 MB。
+单纯重启面板就能全部回收：
+
+| | 重启前 | 重启后 |
+|---|---|---|
+| 已用 | 1179 MB | 419 MB |
+| 可用 | 214 MB | 977 MB |
+| NetworkProcess RSS | 790 MB | 60 MB |
+
+所以 `memguard` 会在两种情况下自动重启一次面板 UI：
+
+| 配置 | 默认 | 含义 |
+|---|---|---|
+| `e5-memguard.main.enabled` | 1 | 总开关 |
+| `e5-memguard.main.min_avail_mb` | 200 | 可用内存低于此值就重启 |
+| `e5-memguard.main.max_age_min` | 360 | 面板运行超过 6 小时就重启（0 关闭） |
+| `e5-memguard.main.check_sec` | 60 | 检查间隔 |
+
+查看是否生效：
+
+```sh
+ps | grep e5-memguard
+logread | grep e5-memguard | tail -5
+```
+
+临时关掉：
+
+```sh
+uci set e5-memguard.main.enabled=0 && uci commit e5-memguard
+```
 
 ### 1. WebKit 单进程模式
 

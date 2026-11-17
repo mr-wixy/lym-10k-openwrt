@@ -316,6 +316,69 @@ uci commit unisoc_modem
 
 ---
 
+### SIM2 显示和 SIM1 一模一样（卡槽其实是空的）
+
+**原因**：这块基带的固件**忽略 `AT+SPACTCARD`**——选到卡槽 2 之后，
+`AT+CPIN?`、`AT+CIMI`、`AT+CCID` 仍然返回卡槽 1 的数据，于是面板把空槽
+显示成和主卡完全一样。
+
+**权威来源是 ModemManager**（所以 LuCI 的 modemmanager 页是对的）：
+
+```sh
+mmcli -m 0 | grep -A2 'sim slot paths'
+#       sim slot paths: slot 1: /org/.../SIM/0 (active)
+#                       slot 2: none
+```
+
+**检查补丁是否在位**：
+
+```sh
+grep -c mm_slot_present /usr/libexec/t551m-sim-status    # 应为 2
+cat /run/t551m-sims.json | head -c 300                   # slot 1 应是 "present": false
+```
+
+**处理**：用 v1.1.0 及以后的镜像。手动确认时也可以直接看：
+
+```sh
+mmcli -J -m any --timeout=5 | grep -o '"sim-slots":[^]]*]'
+# 空槽是 "/"：["/org/freedesktop/ModemManager1/SIM/0", "/"]
+```
+
+---
+
+### 内存占用越来越高（跑到 90%+）
+
+**原因**：面板的 WebKit 网络进程（`WPENetworkProcess`）会缓慢泄漏。
+实测开机 21 小时后 RSS 达 **790 MB**（`VmData` 72 GB）。
+
+**先确认是不是它**：
+
+```sh
+free -m
+for d in /proc/[0-9]*; do set -- $(cat $d/statm 2>/dev/null); \
+  echo "$(( $2 * 4 )) $(tr '\0' ' ' < $d/cmdline | cut -c1-40)"; done | sort -rn | head -5
+```
+
+**立即回收**（约 10 秒，屏幕短暂重绘）：
+
+```sh
+/etc/init.d/e5-infoscreen restart
+free -m
+```
+
+**长期方案**：v1.1.0 起自带 `memguard`，可用内存低于 200 MB 或面板运行超过
+6 小时后自动重启面板：
+
+```sh
+ps | grep e5-memguard
+logread | grep e5-memguard | tail -3
+uci show e5-memguard
+```
+
+详细数据见 [内存占用](07-memory.md)。
+
+---
+
 ### 流量页今日/本月是空的
 
 ```sh
