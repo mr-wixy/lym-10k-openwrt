@@ -47,11 +47,6 @@ $EntriesSectors = 32          # 128 项 × 128 B = 16 KiB
 $LinuxFsType = [byte[]]@(0xAF,0x3D,0xC6,0x0F,0x83,0x84,0x72,0x47,0x8E,0x79,0x3D,0x69,0xD8,0x47,0x7D,0xE4)
 $ZeroGuid = [byte[]]::new(16)
 
-function Invoke-Adb([string]$ArgLine) {
-    $out = & cmd /c "adb $ArgLine 2>&1" | Out-String
-    return $out.Trim()
-}
-function Invoke-Su([string]$Cmd) { return Invoke-Adb ('shell su -c "' + $Cmd + '"') }
 
 function Read-Device {
     param([int]$Skip, [int]$Count)
@@ -62,17 +57,20 @@ function Read-Device {
 }
 function Write-Device {
     param([int]$Skip, [byte[]]$Data)
-    $b64 = [Convert]::ToBase64String($Data)
-    # base64 可能较长，分段写入再拼接到一次 dd 里
-    $tmp = '/data/local/tmp/.e5-gpt.b64'
-    Invoke-Su "rm -f $tmp"
-    for ($i = 0; $i -lt $b64.Length; $i += 3000) {
-        $chunk = $b64.Substring($i, [Math]::Min(3000, $b64.Length - $i))
-        Invoke-Su "echo -n $chunk >> $tmp" | Out-Null
+    # 走 adb push 传文件：不依赖设备端 shell 的 echo。
+    # Android 的 mksh 里 `echo -n` 会输出字面量 "-n"，会写坏数据。
+    $local = Join-Path $env:TEMP ("e5-gpt-" + [guid]::NewGuid().ToString('N') + '.bin')
+    $remote = '/data/local/tmp/.e5-gpt-' + [guid]::NewGuid().ToString('N') + '.bin'
+    try {
+        [IO.File]::WriteAllBytes($local, $Data)
+        $push = Invoke-Adb "push `"$local`" $remote"
+        if ($push -notmatch '1 file pushed') { throw "推送失败: $push" }
+        $r = Invoke-Su "dd if=$remote of=/dev/block/mmcblk0 bs=512 seek=$Skip conv=notrunc 2>&1 | tail -1"
+        return $r
+    } finally {
+        Invoke-Su "rm -f $remote" | Out-Null
+        Remove-Item $local -Force -ErrorAction SilentlyContinue
     }
-    $r = Invoke-Su "base64 -d $tmp | dd of=/dev/block/mmcblk0 bs=512 seek=$Skip conv=notrunc 2>&1 | tail -1"
-    Invoke-Su "rm -f $tmp" | Out-Null
-    return $r
 }
 
 function Get-U16 { param([byte[]]$B, [int]$O) return [BitConverter]::ToUInt16($B, $O) }

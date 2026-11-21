@@ -39,19 +39,21 @@
 
 ### 第 3 步：一键刷入
 
-手机开机进入 **Android** 系统，插上 USB 线，在解压后的文件夹里执行：
+手机开机进入 **Android** 系统，插上 USB 线，然后**双击 `一键刷机.cmd`**：
+选 `1` 先检查计划，选 `2` 直接刷。
+
+或者用命令行：
 
 ```powershell
+# 先看计划（只读，不写手机）
+powershell -ExecutionPolicy Bypass -File .\flash-openwrt.ps1 -DryRun
+
+# 正式刷
 powershell -ExecutionPolicy Bypass -File .\flash-openwrt.ps1
 ```
 
-脚本会自己检查设备、缩容、分区、写入镜像，全程 5–10 分钟。
-看到 `重启中` 就等着，大约 90 秒后进入 OpenWrt。
-
-> 想先看看它要做什么、不写手机？加上 `-DryRun`：
-> ```powershell
-> powershell -ExecutionPolicy Bypass -File .\flash-openwrt.ps1 -DryRun
-> ```
+脚本会自己检查设备、缩容、分区、写入镜像。**真机实测全程约 3 分钟**
+（写镜像 2 GiB @ 44 MB/s 用了 47 秒），之后重启约 90 秒进入 OpenWrt。
 
 ### 第 4 步：连上它
 
@@ -70,6 +72,17 @@ powershell -ExecutionPolicy Bypass -File .\flash-openwrt.ps1
 |---|---|
 | **Android → Linux** | 打开 Magisk → 模块 → `LYM-10K Boot Linux` → 点 **Action** |
 | **Linux → Android** | 网页/SSH 里执行 `e5-next-boot android && reboot` |
+
+### 出问题了？
+
+先跑包里的自检工具（只读，安全）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\check-gpt.ps1
+```
+
+正常应显示 `签名: 'EFI PART'` 和 `header CRC ... OK`。
+详细排查见 [docs/05-troubleshooting.md](docs/05-troubleshooting.md)。
 
 ---
 
