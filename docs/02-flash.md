@@ -1,7 +1,7 @@
 # 一键刷机详解
 
 假设你已经完成 [刷机前必读](01-preparation.md)：解锁 bootloader、装好 Magisk、
-电脑有 adb 和 Python 3。
+电脑有 adb（**不需要 Python**，分区表由脚本内置的 PowerShell 代码处理）。
 
 ---
 

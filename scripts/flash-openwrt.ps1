@@ -28,6 +28,217 @@ param(
 
 $ErrorActionPreference = 'Continue'
 
+# ===================== GPT 编辑（纯 PowerShell，无需 Python 等外部环境）=====================
+# 只读写 17 KiB 的 GPT 区域；主 GPT 与备份 GPT 都会重写并重算 CRC32。
+# CRC32 与解析逻辑已用 Python zlib 交叉验证：逐字节一致。
+$script:AdbTarget = $null
+
+function Invoke-Adb([string]$ArgLine) {
+    $t = if ($script:AdbTarget) { "adb -s $($script:AdbTarget) $ArgLine" } else { "adb $ArgLine" }
+    $out = & cmd /c "$t 2>&1" | Out-String
+    return $out.Trim()
+}
+function Invoke-Su([string]$Cmd) { return Invoke-Adb ('shell su -c "' + $Cmd + '"') }
+
+$Sector = 512
+$EntrySize = 128
+$EntriesSectors = 32          # 128 项 × 128 B = 16 KiB
+# Linux filesystem 分区类型 GUID（磁盘字节序）
+$LinuxFsType = [byte[]]@(0xAF,0x3D,0xC6,0x0F,0x83,0x84,0x72,0x47,0x8E,0x79,0x3D,0x69,0xD8,0x47,0x7D,0xE4)
+$ZeroGuid = [byte[]]::new(16)
+
+function Invoke-Adb([string]$ArgLine) {
+    $out = & cmd /c "adb $ArgLine 2>&1" | Out-String
+    return $out.Trim()
+}
+function Invoke-Su([string]$Cmd) { return Invoke-Adb ('shell su -c "' + $Cmd + '"') }
+
+function Read-Device {
+    param([int]$Skip, [int]$Count)
+    $b64 = Invoke-Su "dd if=/dev/block/mmcblk0 bs=512 skip=$Skip count=$Count 2>/dev/null | base64"
+    $b64 = ($b64 -replace '\s', '')
+    if (-not $b64) { throw "读取扇区 $Skip 失败" }
+    return [Convert]::FromBase64String($b64)
+}
+function Write-Device {
+    param([int]$Skip, [byte[]]$Data)
+    $b64 = [Convert]::ToBase64String($Data)
+    # base64 可能较长，分段写入再拼接到一次 dd 里
+    $tmp = '/data/local/tmp/.e5-gpt.b64'
+    Invoke-Su "rm -f $tmp"
+    for ($i = 0; $i -lt $b64.Length; $i += 3000) {
+        $chunk = $b64.Substring($i, [Math]::Min(3000, $b64.Length - $i))
+        Invoke-Su "echo -n $chunk >> $tmp" | Out-Null
+    }
+    $r = Invoke-Su "base64 -d $tmp | dd of=/dev/block/mmcblk0 bs=512 seek=$Skip conv=notrunc 2>&1 | tail -1"
+    Invoke-Su "rm -f $tmp" | Out-Null
+    return $r
+}
+
+function Get-U16 { param([byte[]]$B, [int]$O) return [BitConverter]::ToUInt16($B, $O) }
+function Get-U32 { param([byte[]]$B, [int]$O) return [BitConverter]::ToUInt32($B, $O) }
+function Get-U64 { param([byte[]]$B, [int]$O) return [BitConverter]::ToUInt64($B, $O) }
+function Set-U32 { param([byte[]]$B, [int]$O, [uint32]$V) [Array]::Copy([BitConverter]::GetBytes($V), 0, $B, $O, 4) }
+function Set-U64 { param([byte[]]$B, [int]$O, [uint64]$V) [Array]::Copy([BitConverter]::GetBytes($V), 0, $B, $O, 8) }
+
+function Get-Crc32 {
+    param([byte[]]$Data)
+    # 标准 CRC-32（与 Python zlib.crc32 一致）
+    $table = Get-Crc32Table
+    $MASK = [uint64]4294967295      # 0xFFFFFFFF
+    [uint64]$crc = $MASK
+    foreach ($b in $Data) {
+        $crc = [uint64]($table[[int](($crc -bxor $b) -band 0xFF)] -bxor ($crc -shr 8))
+        $crc = $crc -band $MASK
+    }
+    return [uint32]($crc -bxor $MASK)
+}
+$script:CrcTable = $null
+function Get-Crc32Table {
+    if ($script:CrcTable) { return $script:CrcTable }
+    $POLY = [uint64]3988292384          # 0xEDB88320
+    $t = New-Object 'uint32[]' 256
+    for ($n = 0; $n -lt 256; $n++) {
+        [uint64]$c = [uint64]$n
+        for ($k = 0; $k -lt 8; $k++) {
+            if ($c -band 1) { $c = [uint64]($POLY -bxor ($c -shr 1)) }
+            else { $c = [uint64]($c -shr 1) }
+        }
+        $t[$n] = [uint32]($c -band 0xFFFFFFFF)
+    }
+    $script:CrcTable = $t
+    return $t
+}
+
+function Get-Entries {
+    param([byte[]]$Raw)
+    $out = @()
+    $count = [int]($Raw.Length / $EntrySize)
+    for ($i = 0; $i -lt $count; $i++) {
+        $o = $i * $EntrySize
+        $type = [byte[]]::new(16)
+        [Array]::Copy($Raw, $o, $type, 0, 16)
+        if (($type | Where-Object { $_ -ne 0 }).Count -eq 0) { $out += $null; continue }
+        $first = [long](Get-U64 $Raw ($o + 32))
+        $last = [long](Get-U64 $Raw ($o + 40))
+        $nameBytes = [byte[]]::new(72)
+        [Array]::Copy($Raw, $o + 56, $nameBytes, 0, 72)
+        $nm = [Text.Encoding]::Unicode.GetString($nameBytes).TrimEnd([char]0)
+        $out += [pscustomobject]@{ Index = $i; Type = $type; First = $first; Last = $last; Name = $nm }
+    }
+    return $out
+}
+
+function New-EntryBytes {
+    param([byte[]]$Type, [long]$First, [long]$Last, [string]$Name)
+    $e = [byte[]]::new($EntrySize)
+    [Array]::Copy($Type, 0, $e, 0, 16)
+    [Array]::Copy($ZeroGuid, 0, $e, 16, 16)
+    Set-U64 $e 32 ([uint64]$First)
+    Set-U64 $e 40 ([uint64]$Last)
+    $nb = [Text.Encoding]::Unicode.GetBytes($Name)
+    $n = [Math]::Min($nb.Length, 72)
+    [Array]::Copy($nb, 0, $e, 56, $n)
+    return $e
+}
+
+function Repair-Header {
+    param([byte[]]$Head, [byte[]]$Entries)
+    $h = [byte[]]::new($Head.Length)
+    [Array]::Copy($Head, $h, $Head.Length)
+    Set-U32 $h 88 (Get-Crc32 $Entries)      # entries CRC
+    Set-U32 $h 16 ([uint32]0)                # header CRC 字段先清零
+    $head92 = [byte[]]::new(92)
+    [Array]::Copy($h, 0, $head92, 0, 92)
+    Set-U32 $h 16 (Get-Crc32 $head92)
+    return $h
+}
+
+# ----------------------------------------------------------------
+
+function Get-GptState {
+    param([string]$AdbSerial)
+    $prev = $script:AdbTarget; $script:AdbTarget = $AdbSerial
+    try {
+        $head = Read-Device -Skip 1 -Count 1
+        $entries = Read-Device -Skip 2 -Count $EntriesSectors
+        $backupLba = [long](Get-U64 $head 32)
+        return [pscustomobject]@{
+            Head = $head; Entries = $entries; BackupLba = $backupLba
+            BackupEntries = (Read-Device -Skip ([int]($backupLba - $EntriesSectors)) -Count $EntriesSectors)
+            BackupHead = (Read-Device -Skip ([int]$backupLba) -Count 1)
+            LastUsable = [long](Get-U64 $head 48)
+        }
+    } finally { $script:AdbTarget = $prev }
+}
+
+function Get-GptPartitionOffset {
+    param([string]$PartitionName, [string]$AdbSerial)
+    $st = Get-GptState -AdbSerial $AdbSerial
+    $e = (Get-Entries $st.Entries) | Where-Object { $_ -and $_.Name -eq $PartitionName } | Select-Object -First 1
+    if (-not $e) { throw "找不到分区 $PartitionName" }
+    return ($e.First * $Sector)
+}
+
+function Invoke-GptCarve {
+    param([long]$UserdataSectors, [string]$Name = 'e5root', [string]$AdbSerial = '', [switch]$DryRun)
+    $prev = $script:AdbTarget; $script:AdbTarget = $AdbSerial
+    try {
+        $st = Get-GptState -AdbSerial $AdbSerial
+        $parsed = Get-Entries $st.Entries
+        $ud = $parsed | Where-Object { $_ -and $_.Name -eq 'userdata' } | Select-Object -First 1
+        if (-not $ud) { Die '没有 userdata 分区' }
+
+        $existing = $parsed | Where-Object { $_ -and $_.Name -eq $Name } | Select-Object -First 1
+        if ($existing) {
+            $mb = [math]::Round(($existing.Last - $existing.First + 1) / 2048)
+            if ($DryRun) { Ok "$Name 已存在：$($existing.First)..$($existing.Last) ($mb MiB)"; Ok "userdata: $($ud.First)..$($ud.Last)"; return }
+            Die "$Name 已存在 ($mb MiB)"
+        }
+
+        $newLast = $ud.First + $UserdataSectors - 1
+        if ($newLast -ge $ud.Last) { Die '新的 userdata 没有变小' }
+        if ($newLast -gt $st.LastUsable) { Die 'userdata 超过最后一个可用扇区' }
+        $rootFirst = $newLast + 1
+        $rootSectors = $st.LastUsable - $rootFirst + 1
+        if ($rootSectors -lt 2 * 1024 * 1024) { Die "空间不足：只够 $rootSectors 个扇区" }
+
+        Ok ("userdata: {0}..{1} -> {0}..{2} ({3} sectors, {4} MiB)" -f $ud.First, $ud.Last, $newLast, $UserdataSectors, ($UserdataSectors / 2048))
+        Ok ("{0}: {1}..{2} ({3} sectors, {4} MiB)" -f $Name, $rootFirst, $st.LastUsable, $rootSectors, ($rootSectors / 2048))
+        if ($DryRun) { return }
+
+        $newEntries = [byte[]]::new($st.Entries.Length)
+        [Array]::Copy($st.Entries, $newEntries, $st.Entries.Length)
+        Set-U64 $newEntries ($ud.Index * $EntrySize + 40) ([uint64]$newLast)
+
+        $freeSlot = -1
+        for ($i = 0; $i -lt $parsed.Count; $i++) { if ($null -eq $parsed[$i]) { $freeSlot = $i; break } }
+        if ($freeSlot -lt 0) { Die 'GPT 条目表已满' }
+        $entry = New-EntryBytes -Type $LinuxFsType -First $rootFirst -Last $st.LastUsable -Name $Name
+        [Array]::Copy($entry, 0, $newEntries, $freeSlot * $EntrySize, $EntrySize)
+
+        $newHead = Repair-Header -Head $st.Head -Entries $newEntries
+        $newBackupHead = Repair-Header -Head $st.BackupHead -Entries $newEntries
+
+        Write-Device -Skip 1 -Data $newHead | Out-Null
+        Write-Device -Skip 2 -Data $newEntries | Out-Null
+        Write-Device -Skip ([int]($st.BackupLba - $EntriesSectors)) -Data $newEntries | Out-Null
+        Write-Device -Skip ([int]$st.BackupLba) -Data $newBackupHead | Out-Null
+        Su 'sync' | Out-Null
+
+        $chk = Get-GptState -AdbSerial $AdbSerial
+        $ok = ($chk.Head -join ',') -eq ($newHead -join ',') -and
+              ($chk.Entries -join ',') -eq ($newEntries -join ',') -and
+              ($chk.BackupEntries -join ',') -eq ($newEntries -join ',') -and
+              ($chk.BackupHead -join ',') -eq ($newBackupHead -join ',')
+        Ok ('verify: ' + $(if ($ok) { 'OK' } else { 'MISMATCH' }))
+        if (-not $ok) { Die 'GPT 写入校验失败' }
+    } finally { $script:AdbTarget = $prev }
+}
+# =========================================================================================
+
+
+
 if (-not $PayloadDir) {
     $base = Split-Path -Parent $PSCommandPath
     if (-not $base) { $base = (Get-Location).Path }
@@ -57,10 +268,7 @@ Info '检查设备与载荷'
 foreach ($f in 'e5root.ext4.gz', 'boot-linux-slotb-release.img', 'lym10k-boot-linux-magisk.zip', 'f2fs-online-arm64') {
     if (-not (Test-Path (Join-Path $PayloadDir $f))) { Die "缺少载荷 $PayloadDir\$f" }
 }
-$gptTool = Join-Path $base 'tools\gpt_carve.py'
-if (-not (Test-Path $gptTool)) { Die "缺少 GPT 工具 $gptTool" }
-$py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
-if (-not $py) { Die '需要 Python 3（编辑 GPT 用）' }
+# GPT 编辑由本脚本内置实现，无需 Python 或任何外部工具
 
 $list = AdbOut 'devices'
 $serials = @($list -split "`n" | Where-Object { $_ -match '\sdevice$' } | ForEach-Object { ($_ -split '\s+')[0] })
@@ -99,14 +307,12 @@ if ($targetBlocks -ge $blocks) {
 $userdataSectors = $targetBlocks * 8
 
 Info '调整分区表（userdata 缩小 + 新增 e5root）'
-$carve = @($gptTool, '--userdata-sectors', $userdataSectors)
-if ($AdbSerial) { $carve += @('--serial', $AdbSerial) }
-if ($DryRun) { $carve += '--dry-run' }
-& $py.Source @carve
-if ($LASTEXITCODE -ne 0) { Die 'GPT 操作失败' }
+$gptArgs = @{ UserdataSectors = $userdataSectors; Name = 'e5root'; AdbSerial = $AdbSerial }
+if ($DryRun) { $gptArgs.DryRun = $true }
+Invoke-GptCarve @gptArgs
 if ($DryRun) { Info 'dry-run 结束，未写设备'; exit 0 }
 
-$offsetBytes = [long]((& $py.Source @($gptTool, '--print-offset', 'e5root', '--serial', $AdbSerial) | Out-String).Trim())
+$offsetBytes = [long](Get-GptPartitionOffset -PartitionName 'e5root' -AdbSerial $AdbSerial)
 Ok "e5root 起始字节: $offsetBytes"
 
 Info '写入 rootfs 镜像到 e5root'

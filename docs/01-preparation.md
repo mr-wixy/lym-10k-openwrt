@@ -81,19 +81,10 @@ adb version
 adb devices        # 手机上会弹「允许 USB 调试」，点允许
 ```
 
-### 3.2 Python 3
+### 3.2 不需要装 Python
 
-刷机脚本用 Python 计算分区表（GPT）。
-
-- Windows：到 [python.org](https://www.python.org/downloads/windows/) 下载安装，
-  **安装时勾选 "Add python.exe to PATH"**；
-- 或者 `winget install Python.Python.3.12`。
-
-验证：
-
-```powershell
-python --version
-```
+**这一步可以跳过。** 早期版本的刷机脚本用 Python 计算分区表，现在已改成纯 PowerShell，
+Windows 10/11 自带就能跑，**不用安装 Python、Node 或任何其他环境**。
 
 ### 3.3 关闭杀毒软件的脚本拦截（如有）
 
@@ -109,7 +100,6 @@ python --version
 - [ ] bootloader 已解锁（开机第一屏有 "unlocked" 提示，或 `fastboot getvar unlocked` 返回 yes）
 - [ ] Magisk 已安装，`adb shell su -c id` 返回 uid=0
 - [ ] `adb devices` 能看到设备
-- [ ] `python --version` 能输出版本号
 - [ ] 手机电量 > 50%
 - [ ] 重要数据已备份
 - [ ] 手机当前运行在 **Android**（不是 Linux）

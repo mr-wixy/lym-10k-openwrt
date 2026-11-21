@@ -29,7 +29,7 @@
 
 1. 解锁 bootloader（会清空手机数据）
 2. 刷入 Magisk 获得 root
-3. 电脑装好 `adb` 和 `Python 3`
+3. 电脑装好 `adb`（**不需要 Python**，脚本是纯 PowerShell）
 
 ### 第 2 步：下载并解压刷机包
 

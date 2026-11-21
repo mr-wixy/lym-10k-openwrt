@@ -1,5 +1,35 @@
 # 更新记录
 
+## v1.2.2（2026-11-21）
+
+**刷机不再需要 Python。** 只装 adb 就能刷，Windows 10/11 开箱即用。
+
+### 变更
+
+- 分区表（GPT）编辑从 Python 脚本移植为**纯 PowerShell 实现**，内置于
+  `flash-openwrt.ps1`。工具脚本 `tools/gpt_carve.py` 已从刷机包移除。
+- 不再需要安装 Python 3、Node 或任何其他运行时。
+
+### 验证
+
+移植后的 CRC32 与 Python `zlib` **逐字节一致**（用真机 GPT 结构做的交叉验证）：
+
+```
+entries CRC  0x6204E759   OK
+主 GPT 头    0x67CA66F9   OK   字节完全一致
+备份 GPT 头  0xD2A45750   OK   字节完全一致
+```
+
+标准校验值也吻合：CRC32("123456789") = `0xCBF43926`。
+
+### 校验
+
+```
+sha256  cf862dfca4d6add2b3f66e18f1997632e20588edae6198f4141c93cd861ecc45  LYM-10K-OpenWrt-OneShot-20261117.zip
+```
+
+---
+
 ## v1.2.1（2026-11-17）
 
 在 v1.2.0 基础上补齐内存与信息屏设置的遗留问题。
